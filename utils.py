@@ -106,3 +106,26 @@ class FileHandler:
         out.write_text(json.dumps(reports, indent=2), encoding="utf-8")
         logging.info(f"JSON report written to {out.as_posix()}")
         return out.as_posix()
+
+    @staticmethod
+    def read_latency_mapping(texts_dir: str) -> dict[str, Any]:
+        """Read optional per-file latency/RTF mapping from texts_dir/latency.json.
+
+        Expected formats:
+        - { "transcript1.txt": 1234 }  # milliseconds
+        - { "transcript1.txt": { "latency_ms": 1234, "rtf": 0.8 } }
+
+        Returns an empty dict if file does not exist or is invalid.
+        """
+        path = Path(texts_dir) / "latency.json"
+        try:
+            if not path.exists():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                logging.warning("latency.json must be an object mapping filenames to values; ignored.")
+                return {}
+            return data
+        except Exception as e:
+            logging.warning(f"Failed to read latency mapping at {path}: {e}")
+            return {}

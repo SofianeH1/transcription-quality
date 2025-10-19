@@ -169,7 +169,6 @@ Desktop.ini
 
 # Data files (you may want to customize this section)
 *.csv
-*.json
 *.xlsx
 *.xls
 *.parquet

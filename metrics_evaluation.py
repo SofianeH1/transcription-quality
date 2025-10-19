@@ -4,10 +4,18 @@ from pathlib import Path
 from typing import Any
 
 from utils import FileHandler
-from dotenv import load_dotenv
+
+def _safe_load_dotenv() -> None:
+    """Load environment variables from a .env file if python-dotenv is available."""
+    try:
+        from dotenv import load_dotenv as _load  # type: ignore
+        _load()
+    except Exception:
+        # Dotenv not installed or failed; ignore silently.
+        pass
 
 # Load environment variables from a .env file if present
-load_dotenv()
+_safe_load_dotenv()
 
 
 class MetricsEvaluator:
@@ -17,6 +25,8 @@ class MetricsEvaluator:
         self.wer_threshold: float = self._get_env_float("WER_THRESHOLD", 0.15)
         self.cer_threshold: float = self._get_env_float("CER_THRESHOLD", 0.1)
         self.tfidf_threshold: float = self._get_env_float("TFIDF_THRESHOLD", 0.75)
+        self.latency_threshold_ms: float = self._get_env_float("LATENCY_THRESHOLD_MS", 800.0)
+        self.rtf_threshold: float = self._get_env_float("RTF_THRESHOLD", 0.8)
 
         self.transcriptor_version: str = os.getenv("TRANSCRIPTOR_VERSION", "unknown")
         self.transcriptor_name: str = os.getenv("TRANSCRIPTOR_NAME", "unknown")
@@ -56,6 +66,22 @@ class MetricsEvaluator:
         """Evaluate if TF-IDF similarity passes threshold (higher is better)."""
         return tfidf_value >= self.tfidf_threshold
 
+    def evaluate_latency_ms(self, latency_ms: float) -> bool:
+        """Evaluate if latency in milliseconds passes threshold (lower is better).
+
+        Requires LATENCY_THRESHOLD_MS to be configured; if not set, callers
+        should skip adding this evaluation.
+        """
+        return latency_ms <= self.latency_threshold_ms
+
+    def evaluate_rtf(self, rtf_value: float) -> bool:
+        """Evaluate if Real-Time Factor passes threshold (lower is better).
+
+        Requires RTF_THRESHOLD to be configured; if not set, callers
+        should skip adding this evaluation.
+        """
+        return rtf_value <= self.rtf_threshold
+
     def evaluate_all_metrics(self, metrics: dict[str, float]) -> dict[str, bool]:
         """
         Evaluate all metrics against their thresholds.
@@ -64,13 +90,18 @@ class MetricsEvaluator:
             metrics: Dictionary containing metric values
 
         Returns:
-            Dictionary with boolean results for each metric
+            Dictionary with boolean results for each applicable metric
         """
-        return {
+        evaluations: dict[str, bool] = {
             "wer_passed": self.evaluate_wer(metrics.get("word_error_rate", 1.0)),
             "cer_passed": self.evaluate_cer(metrics.get("character_error_rate", 1.0)),
             "tfidf_passed": self.evaluate_tfidf(metrics.get("tfidf_similarity", 0.0)),
+            "latency_passed": self.evaluate_latency_ms(
+                float(metrics.get("latency_ms", float("inf")))
+            ),
+            "rtf_passed": self.evaluate_rtf(float(metrics.get("rtf", float("inf")))),
         }
+        return evaluations
 
     def get_detailed_report(self, metrics: dict[str, float]) -> dict[str, Any]:
         """
@@ -83,28 +114,28 @@ class MetricsEvaluator:
             Detailed report with scores, evaluations, and overall status
         """
         evaluations = self.evaluate_all_metrics(metrics)
-        global_ok = (
-            evaluations["tfidf_passed"]
-            and evaluations["wer_passed"]
-            and evaluations["cer_passed"]
-        )
-        return {
+        # All included evaluations must pass
+        global_ok = all(bool(v) for v in evaluations.values())
+        result = {
             "metrics": metrics,
             "evaluations": evaluations,
             "thresholds": {
                 "wer_threshold": self.wer_threshold,
                 "cer_threshold": self.cer_threshold,
                 "tfidf_threshold": self.tfidf_threshold,
+                "latency_threshold_ms": self.latency_threshold_ms,
+                "rtf_threshold": self.rtf_threshold,
             },
             "transcriptor": {
                 "name": self.transcriptor_name,
                 "version": self.transcriptor_version,
                 "environment": self.transcriptor_environment,
             },
-            "passed_metrics": sum(evaluations.values()),
+            "passed_metrics": sum(1 for v in evaluations.values() if v),
             "total_metrics": len(evaluations),
             "overall_passed": global_ok,
         }
+        return result
 
     def _print_transcriptor_info(self) -> None:
         """Print transcriptor info used to generate the transcriptions."""
@@ -120,6 +151,8 @@ class MetricsEvaluator:
         print(f"  wer_threshold: {self.wer_threshold}")
         print(f"  cer_threshold: {self.cer_threshold}")
         print(f"  tfidf_threshold: {self.tfidf_threshold}")
+        print(f"  latency_threshold_ms: {self.latency_threshold_ms}")
+        print(f"  rtf_threshold: {self.rtf_threshold}")
 
     @staticmethod
     def _print_metrics_and_results(
@@ -136,20 +169,36 @@ class MetricsEvaluator:
         print(f"\n📄 {name} ({Path(hyp_path).name})")
         print("-" * 80)
         print("📊 Metrics:")
-        tfidf_ok = evaluations["tfidf_passed"]
-        wer_ok = evaluations["wer_passed"]
-        cer_ok = evaluations["cer_passed"]
+        def _print_line(label: str, value: object, ok: bool) -> None:
+            # Render value as number when possible, otherwise N/A
+            try:
+                fv = float(value)  # type: ignore[arg-type]
+                text = f"{fv:.3f}"
+            except Exception:
+                text = "N/A"
+            print(f"  {label:<22} {text}  -> pass: {ok} {_icon(ok)}")
 
-        print(
-            f"  TF-IDF Similarity:      {metrics['tfidf_similarity']:.3f}  -> pass: {tfidf_ok} {_icon(tfidf_ok)}"
-        )
-        print(
-            f"  Word Error Rate:        {metrics['word_error_rate']:.3f}  -> pass: {wer_ok} {_icon(wer_ok)}"
-        )
-        print(
-            f"  Character Error Rate:   {metrics['character_error_rate']:.3f}  -> pass: {cer_ok} {_icon(cer_ok)}"
-        )
+        _print_line("TF-IDF Similarity:", metrics.get("tfidf_similarity"), evaluations["tfidf_passed"])  # type: ignore[arg-type]
+        _print_line("Word Error Rate:", metrics.get("word_error_rate"), evaluations["wer_passed"])  # type: ignore[arg-type]
+        _print_line("Character Error Rate:", metrics.get("character_error_rate"), evaluations["cer_passed"])  # type: ignore[arg-type]
+        _print_line("Latency (ms):", metrics.get("latency_ms"), evaluations["latency_passed"])  # type: ignore[arg-type]
+        _print_line("Real-Time Factor:", metrics.get("rtf"), evaluations["rtf_passed"])  # type: ignore[arg-type]
         print(f"\n  Overall Result:         pass: {overall_ok} {_icon(overall_ok)}")
+
+    @staticmethod
+    def _enrich_with_latency(metrics: dict[str, float], hyp_path: str, latency_map: dict[str, Any]) -> None:
+        """Attach latency/rtf values from latency_map to metrics in-place.
+
+        Assumes each entry is of the form: {"latency_ms": <number>, "rtf": <number>}.
+        """
+        try:
+            meta = latency_map[Path(hyp_path).name]
+            metrics["latency_ms"] = float(meta["latency_ms"])  # type: ignore[index]
+            metrics["rtf"] = float(meta["rtf"])  # type: ignore[index]
+        except Exception as e:
+            logging.warning(
+                f"Could not attach latency/rtf for {Path(hyp_path).name}: {e}"
+            )
 
     def evaluate_transcriptions(
         self, texts_dir: str = "texts", analyzer: Any | None = None
@@ -165,7 +214,8 @@ class MetricsEvaluator:
             A list of detailed reports, one per transcript.
         """
         pairs = FileHandler.scan_texts_folder(texts_dir)
-        
+        latency_map = FileHandler.read_latency_mapping(texts_dir)
+
         print("=" * 80)
         print("TRANSCRIPTION QUALITY METRICS REPORT")
         print("=" * 80)
@@ -175,6 +225,7 @@ class MetricsEvaluator:
 
         reports: list[dict[str, Any]] = []
         base_dir = Path(__file__).parent
+
         for gt_path, hyp_path, name in pairs:
             try:
                 abs_gt = (base_dir / gt_path).as_posix()
@@ -188,6 +239,7 @@ class MetricsEvaluator:
                         "to evaluate_transcriptions(analyzer=...)."
                     )
                 metrics = analyzer.compute_all_metrics(reference, generated_transcription)
+                MetricsEvaluator._enrich_with_latency(metrics, hyp_path, latency_map)
                 detailed = self.get_detailed_report(metrics)
                 MetricsEvaluator._print_metrics_and_results(
                     name,
